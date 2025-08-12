@@ -34,17 +34,17 @@
 #define T_TransferLenMax            30      /* PC通信最大数据长度 */
 #define T_TransferLenMin            5  	    /* PC通信最大数据长度 */
 
-#define dowM_CtrlUploadImp          0x10	    /* 主动上传阻抗信息 */
-#define dowM_CtrlImpSwitch          0x20	    /* 阻抗开关 */
-#define dowM_CtrlRelaySwitch        0x30	    /* 继电器开关、多区域放电 */
-#define dowM_GetRelayState          0x31	    /* 读取继电器开关状态 */
+#define dowM_CtrlUploadImp          0x10	/* 主动上传阻抗信息 */
+#define dowM_CtrlImpSwitch          0x20	/* 阻抗开关 */
+#define dowM_CtrlRelaySwitch        0x30	/* 继电器开关、多区域放电 */
+#define dowM_GetRelayState          0x31	/* 读取继电器开关状态 */
 
 /***************上行命令**********************/
 /*下位机主动上发类*/
-#define upM_AutoUploadImp           0x50	    /* 自动上传阻抗数据 */
+#define upM_AutoUploadImp           0x50	/* 自动上传阻抗数据 */
 
-#define M_TransferLenMax            30          /* PC通信最大数据长度 */
-#define M_TransferLenMin            5  	        /* PC通信最大数据长度 */
+#define M_TransferLenMax            30      /* PC通信最大数据长度 */
+#define M_TransferLenMin            5  	    /* PC通信最大数据长度 */
 
 /*------------------------------ typedef definition --------------------------*/
 

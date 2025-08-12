@@ -13,394 +13,275 @@
 #include "minmax.h"
 #include <string.h>
 
-#define  DEBUG_TAG                  "serial_proto"
-#define  FILE_DEBUG_LEVEL           3
-#define  FILE_ASSERT_ENABLED        1
+#define  LOG_TAG             "serial_proto"
+#define  LOG_LVL             4
 #include "log.h"
 #include <assert.h>
 
 /* Private typedef -----------------------------------------------------------*/
-static proto_get_tick_func_t s_get_tick_func = NULL;  // 静态函数指针,用于获取系统时间
-
-static void reset_parser(proto_parser_t *parser, uint32_t current_time_ms);
+static void reset_parser(proto_parser_t *parser, uint32_t now_time);
 static int validate_and_handle_frame(proto_parser_t *parser);
 
 /* Exported functions --------------------------------------------------------*/
 /**
  * @brief 初始化帧解析器
- * @param parser 解析器实例指针
- * @param serial 串口实例指针
- * @param config 帧协议配置指针
+ * @param p 解析器实例指针
+ * @param fifo 串口实例指针
+ * @param cfg 帧协议配置指针
  * @param get_tick_func 获取系统时间的函数指针
  */
-int frame_parser_init(proto_parser_t       *parser,
-                     serial_t             *serial, 
-                     const frame_config_t *config,
-                     proto_get_tick_func_t get_tick_func)
+int frame_parser_init(proto_parser_t       *p,
+                      kfifo_t              *fifo,
+                      const frame_cfg_t *cfg,
+                      proto_get_tick_func_t get_tick_func)
 {
-    if (parser == NULL || config == NULL || serial == NULL || get_tick_func == NULL) {
-        LOG_E("parser or config or serial or get_tick_func is NULL\r\n");
-        return -EINVAL;
+    if (!p || !fifo || !cfg || !cfg->head_bytes || cfg->head_len == 0 || !cfg->tail_bytes || cfg->tail_len == 0 || !cfg->rx_buff || cfg->rx_buffsz == 0 || !get_tick_func)
+        return -1;
+    if (kfifo_esize(fifo) != 1) {
+        LOG_E("kfifo esize must be 1 (byte FIFO)\r\n");
+        return -2;
+    }
+    if (cfg->max_frame_size == 0 || cfg->max_frame_size > cfg->rx_buffsz) {
+        LOG_E("max_frame_size must be >0 and <= rx_buffsz\r\n");
+        return -3;
+    }
+    if (cfg->type == FRAME_TYPE_VAR_LEN_FIELD && cfg->len_field_size == 0)
+        return -4;
+    if (cfg->type == FRAME_TYPE_FIXED_LEN && cfg->fixed_len == 0)
+        return -5;
+    if (cfg->checksum_size && !cfg->calc_checksum)
+        return -6;
+    
+    // (核心修改) 校验用户配置的 min_frame_size
+    if (cfg->min_frame_size == 0 || cfg->min_frame_size > cfg->max_frame_size) {
+        LOG_E("min_frame_size must be >0 and <= max_frame_size\r\n");
+        return -7;
+    }
+    // 安全性检查：最小帧长至少要能容纳 帧头+帧尾+校验
+    if (cfg->min_frame_size < (cfg->head_len + cfg->tail_len + cfg->checksum_size)) {
+        LOG_E("min_frame_size is smaller than protocol overhead (head+tail+checksum)\r\n");
+        return -8;
+    }
+    if (cfg->type == FRAME_TYPE_FIXED_LEN && cfg->min_frame_size != cfg->fixed_len) {
+        LOG_W("For fixed length frames, min_frame_size should be equal to fixed_len\r\n");
     }
 
-    assert(config->type == FRAME_TYPE_FIXED_LEN || 
-           config->type == FRAME_TYPE_VAR_LEN_FIELD || 
-           config->type == FRAME_TYPE_VAR_LEN_TERMINATOR);
-    assert(config->head_bytes != NULL);
-    assert(config->head_len > 0 && config->head_len < config->rx_buffsz);
-    assert(config->tail_bytes != NULL);
-    assert(config->tail_len > 0 && config->tail_len < config->rx_buffsz);
-    assert(config->timeout_ms > 0);
-    assert(config->max_frame_size > 0 && config->max_frame_size <= config->rx_buffsz);
-    assert(config->rx_buffsz > 0 && config->rx_buffsz <= serial->rx_bufsz);
-    assert(config->rx_buff != NULL);
+    p->cfg = cfg;
+    p->fifo = fifo;
+    p->get_tick = get_tick_func;
 
-    if (config->type == FRAME_TYPE_VAR_LEN_FIELD) {
-        assert(config->len_field_offset > 0);
-        assert(config->len_field_size > 0);
-    } else if (config->type == FRAME_TYPE_FIXED_LEN) {
-        assert(config->fixed_len > 0);
-    }
-
-    if (config->checksum_size > 0) {
-        assert(config->calc_checksum != NULL);
-    }
-    
-    parser->serial = serial;
-    parser->config = config;
-    s_get_tick_func = get_tick_func;  // 保存获取系统时间的函数指针
-    
-    // 消息队列创建
-    parser->msg_queue = xQueueCreate(32, sizeof(proto_msg_t));
-    if (parser->msg_queue == NULL)
-        return -ENOMEM;
-    
-    reset_parser(parser, s_get_tick_func());
+    frame_parser_reset(p, p->get_tick());
     
     return 0;
 }
 
 /**
  * @brief 帧处理函数
- * @param parser 解析器实例指针
+ * @param p 解析器实例指针
  */
-void frame_parser_process(proto_parser_t *parser)
+void frame_parser_process(proto_parser_t *p)
 {
-    const frame_config_t *cfg = parser->config;
-    size_t linear_size, tail_pos;
-    uint32_t current_time_ms = s_get_tick_func();  // 使用函数指针获取当前时间
+    const frame_cfg_t *cfg = p->cfg;
+    uint32_t now_time = p->get_tick();
 
-    // 检查是否超时
-    if (parser->state != STATE_FINDING_HEAD &&
-        (current_time_ms - parser->last_rx_time > cfg->timeout_ms) ) {
-        LOG_D("Protocol timeout!\r\n");
-        
-        if (kfifo_len(&parser->serial->rx_fifo) >= cfg->head_len) {
-            kfifo_skip_count(&parser->serial->rx_fifo, cfg->head_len);
-        } else {
-            kfifo_skip_count(&parser->serial->rx_fifo, 1);
-        }
-        reset_parser(parser, current_time_ms);
+    if (p->state != STATE_FINDING_HEAD && (now_time - p->last_time > cfg->timeout)) {
+        LOG_D("Protocol timeout!\r\n");   
+        kfifo_skip(p->fifo);
+        reset_parser(p, now_time);
         return;
     }
-
-    if (kfifo_is_empty(&parser->serial->rx_fifo)) {
-        return;
-    }
-
-    while(!kfifo_is_empty(&parser->serial->rx_fifo)) 
+    
+    // (核心修改) 直接使用用户配置的最小帧长作为准入条件
+    while(kfifo_len(p->fifo) >= cfg->min_frame_size) 
     {
-        switch (parser->state) {
+        switch (p->state)
+        {
             case STATE_FINDING_HEAD: {
-                // 使用零拷贝技术在kfifo的线性区中查找帧头
-                linear_size = kfifo_out_linear(&parser->serial->rx_fifo, &tail_pos, kfifo_len(&parser->serial->rx_fifo));
-                uint8_t *linear_buf = (uint8_t*)parser->serial->rx_buf + tail_pos;
+                size_t tail_pos;
+                size_t linear_size = kfifo_out_linear(p->fifo, &tail_pos, kfifo_size(p->fifo));
+                uint8_t *linear_buf = (uint8_t*)p->fifo->data + tail_pos;
                 
-                // memchr查找帧头的第一个字节
                 uint8_t *head_pos = (uint8_t *)memchr(linear_buf, cfg->head_bytes[0], linear_size);
                 
                 if (head_pos) {
-                    // 找到了第一个字节
                     size_t junk_len = head_pos - linear_buf;
-                    kfifo_skip_count(&parser->serial->rx_fifo, junk_len); // 丢弃前面的无效数据
-                    
-                    parser->state = STATE_READING_HEAD;
-                    parser->last_rx_time = current_time_ms; // 更新时间戳
-                    // 不需要break，直接进入下一个状态继续处理
+                    if(junk_len > 0) kfifo_skip_count(p->fifo, junk_len);
+
+                    if (kfifo_len(p->fifo) < cfg->head_len) {
+                        return;
+                    }
+
+                    kfifo_out_peek(p->fifo, cfg->rx_buff, cfg->head_len);
+                    if (memcmp(cfg->rx_buff, cfg->head_bytes, cfg->head_len) == 0) {
+                        LOG_D("The header matching was successful!\r\n");
+                        p->last_time = now_time;
+                        switch(cfg->type) {
+                            case FRAME_TYPE_FIXED_LEN:
+                                p->current_frame_len = cfg->fixed_len;
+                                p->state = STATE_READING_DATA;
+                                break;
+                            case FRAME_TYPE_VAR_LEN_FIELD:
+                                p->state = STATE_READING_LEN;
+                                break;
+                            case FRAME_TYPE_VAR_LEN_TERMINATOR:
+                                p->current_frame_len = 0;
+                                p->state = STATE_READING_DATA;
+                                break;
+                        }
+                    } else {
+                        LOG_D("Header mismatch after finding first byte!\r\n");
+                        kfifo_skip(p->fifo);
+                    }
                 } else {
-                    // 整个线性区都没有找到，全部丢弃
-                    kfifo_skip_count(&parser->serial->rx_fifo, linear_size);
-                    return; // 等待下一次调用
-                }
-            }
-            
-            case STATE_READING_HEAD: {
-                if (kfifo_len(&parser->serial->rx_fifo) < cfg->head_len) {
-                    // 数据不足以读取完整帧头，等待
+                    kfifo_skip_count(p->fifo, linear_size);
                     return;
                 }
-                
-                kfifo_out_peek(&parser->serial->rx_fifo, cfg->rx_buff, cfg->head_len);
-                if (memcmp(cfg->rx_buff, cfg->head_bytes, cfg->head_len) == 0) {
-                    // 帧头匹配成功
-                    switch(cfg->type) {
-                        case FRAME_TYPE_FIXED_LEN:
-                            parser->current_frame_len = cfg->fixed_len;
-                            parser->state = STATE_READING_DATA;
-                            break;
-                        case FRAME_TYPE_VAR_LEN_FIELD:
-                            parser->state = STATE_READING_LEN;
-                            break;
-                        case FRAME_TYPE_VAR_LEN_TERMINATOR:
-                            parser->current_frame_len = 0; // 长度未知
-                            parser->state = STATE_READING_DATA;
-                            break;
-                    }
-                    parser->last_rx_time = current_time_ms; // 更新时间戳
-                } else {
-                    // 帧头不匹配（第一个字节相同，但后续不同），丢弃一个字节后重新寻找
-                    kfifo_skip_count(&parser->serial->rx_fifo, 1);
-                    LOG_D("Header mismatch!\r\n");
-                    reset_parser(parser, current_time_ms);
-                }
-                break; // 状态切换后，在下一次while循环中处理
+                break;
             }
 
-            case STATE_READING_LEN: { // Only for FRAME_TYPE_VAR_LEN_FIELD
+            case STATE_READING_LEN: {
                 size_t bytes_needed = cfg->len_field_offset + cfg->len_field_size;
-                if (kfifo_len(&parser->serial->rx_fifo) < bytes_needed) {
-                    // 数据不足以读取长度字段
+                if (kfifo_len(p->fifo) < bytes_needed) {
                     return;
                 }
                 
-                kfifo_out_peek(&parser->serial->rx_fifo, cfg->rx_buff, bytes_needed);
-                // 根据长度字段大小直接从字节数组中获取长度值
+                kfifo_out_peek(p->fifo, cfg->rx_buff, bytes_needed);
+                
                 uint16_t payload_len = 0;
+                const uint8_t* p_len = cfg->rx_buff + cfg->len_field_offset;
+
                 if (cfg->len_field_size == 1) {
-                    payload_len = cfg->rx_buff[cfg->len_field_offset];
+                    payload_len = *p_len;
                 } else if (cfg->len_field_size == 2) {
-                    // 默认按小端序读取
-                    payload_len = cfg->rx_buff[cfg->len_field_offset] | 
-                                 (cfg->rx_buff[cfg->len_field_offset + 1] << 8);
-                    
-                    // 如果是大端序，则转换
+                    payload_len = *(uint16_t*)p_len;
                     if (cfg->is_big_endian) {
                         payload_len = be16_to_cpu(payload_len);
                     }
                 }
                 
-                // 计算总帧长
                 if (cfg->calc_frame_len) {
-                    // 使用自定义函数计算帧总长度
-                    parser->current_frame_len = cfg->calc_frame_len(payload_len, cfg->head_len, cfg->tail_len, cfg->checksum_size);
+                    p->current_frame_len = cfg->calc_frame_len((struct frame_parser*)p, payload_len);
                 } else {
-                    // 默认计算方式：帧头 + 数据载荷长度 + 校验 + 帧尾
-                    parser->current_frame_len = payload_len + cfg->head_len + cfg->tail_len + cfg->checksum_size;
+                    p->current_frame_len = payload_len + cfg->head_len + cfg->tail_len + cfg->checksum_size;
                 }
                 
-                // **关键的健壮性检查**
-                if (parser->current_frame_len < (cfg->head_len + cfg->checksum_size + cfg->tail_len) || 
-                    parser->current_frame_len > cfg->max_frame_size) {
-                    // 无效的长度（太短或长于最大帧大小限制）
-                    // 判定为错误帧，丢弃帧头，重新寻找
-                    kfifo_skip_count(&parser->serial->rx_fifo, cfg->head_len);
-                    LOG_D("Error frame! Discard header and search again!\r\n");
-                    reset_parser(parser, current_time_ms);
-                    break;
+                if (p->current_frame_len < cfg->min_frame_size || p->current_frame_len > cfg->max_frame_size) {
+                    LOG_D("Invalid frame length! Discard header and search again!\r\n");
+                    kfifo_skip(p->fifo);
+                    reset_parser(p, now_time);
+                } else {
+                    p->state = STATE_READING_DATA;
                 }
-                parser->state = STATE_READING_DATA;
-                break; // 状态切换后，在下一次while循环中处理
+                break; 
             }
 
             case STATE_READING_DATA: {
                 if (cfg->type == FRAME_TYPE_VAR_LEN_TERMINATOR) {
-                    // 对于以帧尾结束的类型，我们需要搜索帧尾
-                    size_t len = kfifo_len(&parser->serial->rx_fifo);
-                    if (len < (cfg->head_len + cfg->tail_len))
-                        return; // 数据太少，不可能有完整帧
-                    
+                    size_t len = kfifo_len(p->fifo);
+                    int found_tail = 0;
                     for (size_t i = cfg->head_len; i <= (len - cfg->tail_len); ++i) {
-                         kfifo_out_peek(&parser->serial->rx_fifo, cfg->rx_buff, i + cfg->tail_len);
+                         kfifo_out_peek(p->fifo, cfg->rx_buff, i + cfg->tail_len);
                          if (memcmp(cfg->rx_buff + i, cfg->tail_bytes, cfg->tail_len) == 0) {
-                            // 找到了帧尾
-                            parser->current_frame_len = i + cfg->tail_len;
-                            // 最小帧长度的验证
-                            if (parser->current_frame_len < (cfg->head_len + cfg->tail_len + cfg->checksum_size)) {
-                                LOG_D("Frame too short: %zu\r\n", parser->current_frame_len);
-                                kfifo_skip_count(&parser->serial->rx_fifo, cfg->head_len);
-                                reset_parser(parser, current_time_ms);
-                                return;
+                            p->current_frame_len = i + cfg->tail_len;
+                            if (p->current_frame_len > cfg->max_frame_size) {
+                                LOG_D("Frame too long: %zu, discard and restart!\r\n", p->current_frame_len);
+                                kfifo_skip(p->fifo); //
+                                reset_parser(p, now_time);
+                                found_tail = -1; // 特殊标记，用于跳出外层循环
+                            } else {
+                                found_tail = 1;
                             }
-                            // Fallthrough to validation
-                            goto frame_validation;
+                            break; // 退出 for 循环
                          }
                     }
-                    // 如果fifo满了还没找到，则丢弃最老的数据
-                    if(kfifo_is_full(&parser->serial->rx_fifo)){
-                        kfifo_skip_count(&parser->serial->rx_fifo, 1);
-                    }
-                    return;
 
-                } else { // 对于固定长度和带长度字段的帧
-                    if (kfifo_len(&parser->serial->rx_fifo) < parser->current_frame_len) {
-                        return; // 数据不足，等待
+                    if (found_tail == 1) {
+                        goto frame_validation;
+                    } else if (found_tail == 0) {
+                        if(kfifo_is_full(p->fifo)){
+                            LOG_D("Terminator not found and fifo is full, discard oldest byte\r\n");
+                            kfifo_skip(p->fifo); //
+                        }
+                        return; // 未找到帧尾，等待更多数据
                     }
-                    // Fallthrough to validation
+                    // 如果 found_tail == -1 (帧超长)，则直接跳到循环末尾
+                    goto frame_validation;
+                } else {
+                    if (kfifo_len(p->fifo) < p->current_frame_len) {
+                        return;
+                    }
                 }
 
             frame_validation:;
-                int result = validate_and_handle_frame(parser);
-                if (result == 0) { // 成功
-                    // 成功处理了一帧，重置以寻找下一帧
-                    reset_parser(parser, current_time_ms);
-                } else if (result == -1) { // 帧无效
+                int result = validate_and_handle_frame(p);
+                if (result < 0) {
                     LOG_D("Discarding invalid frame\r\n");
-                    kfifo_skip_count(&parser->serial->rx_fifo, 1); // 丢弃已验证的帧头（或一个字节）
-                    reset_parser(parser, current_time_ms);
+                    kfifo_skip(p->fifo);
                 }
-                // 如果 result == 1 (数据不足), 则不做任何事，退出循环等待更多数据
-                if(result != 1){
-                    continue; // 处理完一帧（无论好坏），立即尝试处理下一帧
-                } else {
-                    return;
-                }
+                reset_parser(p, now_time);
+                break;
             }
-        } // end switch
-    } // end while
+        }
+    }
 }
 
-void frame_parser_reset(proto_parser_t *parser)
+void frame_parser_reset(proto_parser_t *p, uint32_t now)
 {
-    if (parser == NULL) {
-        LOG_E("parser is NULL\r\n");
-        return;
-    }
-    
-    reset_parser(parser, s_get_tick_func());
+    if (!p) return;
+    reset_parser(p, now);
 }
-
-int proto_msg_get(proto_parser_t *parser, proto_msg_t *msg)
-{
-    if (parser == NULL || msg == NULL) {
-        LOG_E("parser or msg is NULL\r\n");
-        return -EINVAL;
-    }
-
-    if (parser->msg_queue == NULL) {
-        LOG_E("msg_queue is NULL\r\n");
-        return -EINVAL;
-    }
-
-    if (xQueueReceive(parser->msg_queue, msg, portMAX_DELAY) != pdPASS) {
-        LOG_E("Failed to receive message from queue!\r\n");
-        return -1;
-    }
-
-    return 0;
-}
-
-void proto_msg_free(proto_msg_t *msg)
-{  
-    vPortFree(msg->data);
-    msg->data = NULL;
-    msg->len = 0;
-}
-
 
 /* Private functions ---------------------------------------------------------*/
-/**
- * @brief 在找到一个潜在的完整帧后，进行校验和处理
- * @return 0: 帧有效并已处理, -1: 帧无效, 1: 数据不足无法判断
- */
 static int validate_and_handle_frame(proto_parser_t *parser)
 {
-    const frame_config_t *cfg = parser->config;
+    const frame_cfg_t *cfg = parser->cfg;
     
-    kfifo_out_peek(&parser->serial->rx_fifo, cfg->rx_buff, parser->current_frame_len);
+    kfifo_out_peek(parser->fifo, cfg->rx_buff, parser->current_frame_len);
 
-    // 验证帧尾
     if (cfg->type != FRAME_TYPE_VAR_LEN_TERMINATOR) {
         if (memcmp(cfg->rx_buff + parser->current_frame_len - cfg->tail_len, cfg->tail_bytes, cfg->tail_len) != 0) {
             LOG_D("Tail mismatch!\r\n");
-            return -1; // 帧尾不匹配
+            return -1;
         }
     }
 
-    // 验证校验
     if (cfg->checksum_size > 0 && cfg->calc_checksum != NULL) {
-        // 计算校验的数据范围：从帧头开始（不包括帧头），到校验码之前
-        size_t data_to_check_len = parser->current_frame_len - cfg->tail_len - cfg->checksum_size - cfg->head_len;
+        size_t data_to_check_len = parser->current_frame_len - cfg->head_len - cfg->tail_len - cfg->checksum_size;
         
         uint32_t calculated_checksum = cfg->calc_checksum(&cfg->rx_buff[cfg->head_len], data_to_check_len);
-        
-        // 从帧数据中提取接收到的校验码
+        const uint8_t* p_checksum = cfg->rx_buff + cfg->head_len + data_to_check_len;
         uint32_t received_checksum = 0;
-        const uint8_t* p_checksum = cfg->rx_buff + data_to_check_len + cfg->head_len;
         
         if(cfg->checksum_size == 1) {
-            received_checksum = *p_checksum; // 单字节无需转换字节序
-        }
-        else if(cfg->checksum_size == 2) {
-            uint16_t checksum16 = p_checksum[0] | (p_checksum[1] << 8); // 先按小端序读取
-            
-            if(cfg->is_big_endian) {
-                checksum16 = be16_to_cpu(checksum16); // 如果是大端序，使用转换函数
-            }
-            received_checksum = checksum16;
-        }
-        else if(cfg->checksum_size == 4) {
-            // 先按小端序读取
-            uint32_t checksum32 = p_checksum[0] | (p_checksum[1] << 8) | (p_checksum[2] << 16) | (p_checksum[3] << 24);
-            
-            if(cfg->is_big_endian) {
-                checksum32 = be32_to_cpu(checksum32); // 如果是大端序，使用转换函数
-            }
-            received_checksum = checksum32;
+            received_checksum = *p_checksum;
+        } else if(cfg->checksum_size == 2) {
+            received_checksum = *(uint16_t*)p_checksum;
+            if(cfg->is_big_endian) received_checksum = be16_to_cpu(received_checksum);
+        } else if(cfg->checksum_size == 4) {
+            received_checksum = *(uint32_t*)p_checksum;
+            if(cfg->is_big_endian) received_checksum = be32_to_cpu(received_checksum);
         }
 
         if (calculated_checksum != received_checksum) {
-            LOG_D("Checksum mismatch!\r\n");
-            return -1; // 校验失败
+            LOG_D("Checksum mismatch! calculated: %08X, received: %08X\r\n", calculated_checksum, received_checksum);
+            return -2;
         }
     }
     
-    // 计算有效数据位置和长度（去除帧头、帧尾、校验）
     size_t data_offset = cfg->head_len;
     size_t data_len = parser->current_frame_len - cfg->head_len - cfg->tail_len - cfg->checksum_size;
     
-    // 推送到消息队列
-    if (data_len > 0) {
-        proto_msg_t msg;
-        
-        // 分配并复制有效数据到消息缓冲区
-        uint8_t *msg_data = pvPortMalloc(data_len);
-        if (msg_data == NULL) {
-            LOG_E("Failed to allocate message buffer!\r\n");
-            return -1;
-        }
-        memcpy(msg_data, cfg->rx_buff + data_offset, data_len);
-        
-        msg.data = msg_data;
-        msg.len = data_len;
-        
-        // 将消息推送到队列中
-        if (xQueueSend(parser->msg_queue, &msg, portMAX_DELAY) != pdPASS) {
-            LOG_E("Failed to send message to queue!\r\n");
-            return -1;
-        }
+    if (cfg->on_frame && data_len > 0) {
+        cfg->on_frame(cfg->rx_buff + data_offset, data_len, cfg->user_data);
     }
 
-    // 从FIFO中正式丢弃已处理的帧数据
-    kfifo_skip_count(&parser->serial->rx_fifo, parser->current_frame_len);
-    return 0; // 成功
+    kfifo_skip_count(parser->fifo, parser->current_frame_len);
+    return 0;
 }
 
-/**
- * @brief 重置解析器状态
- */
-static void reset_parser(proto_parser_t *parser, uint32_t current_time_ms)
+static void reset_parser(proto_parser_t *parser, uint32_t now_time)
 {
     parser->state = STATE_FINDING_HEAD;
     parser->current_frame_len = 0;
-    parser->last_rx_time = current_time_ms;
+    parser->last_time = now_time;
 }

@@ -34,8 +34,7 @@
 #include <string.h>
 
 #include "app.h"
-#include "frame_parser.h"
-#include "crc.h"
+#include "custom_proto.h"
 /* Private typedef -----------------------------------------------------------*/
 
 /* Private define ------------------------------------------------------------*/
@@ -50,41 +49,7 @@ uint8_t w_buf[16] = "hello nihao!";
 /* Private function prototypes -----------------------------------------------*/
 
 /* Private functions ---------------------------------------------------------*/
-void on_frame_received(void *user_data, const uint8_t *payload, size_t len)
-{
-    printf("----> FRAME RECEIVED (User Data: %s) | len: %zu | payload: ", (char*)user_data, len);
-    for(size_t i = 0; i < len; ++i) printf("%02X ", payload[i]);
-    printf("<----\n\n");
-}
 
-void on_parse_error(void *user_data, error_code_t error)
-{
-    const char* err_str = "UNKNOWN";
-    switch(error) {
-        case ERR_TIMEOUT: err_str = "TIMEOUT"; break;
-        case ERR_INVALID_LENGTH: err_str = "INVALID LENGTH"; break;
-        case ERR_BAD_TAIL: err_str = "BAD TAIL"; break;
-        case ERR_BAD_CHECKSUM: err_str = "BAD CHECKSUM"; break;
-        default: break;
-    }
-    LOG_D("!!!! PARSE ERROR (User Data: %s): %s !!!!\n\n", (char*)user_data, err_str);
-}
-
-static const uint8_t   custom_header[] = {0xFA};
-static const uint8_t   custom_tail[] = {0x0D};
-static const protocol_def_t custom_frame_config = {
-    .frame_type = FRAME_TYPE_LEN_PREFIX,
-    .header = custom_header,
-    .header_len = sizeof(custom_header),
-    .tail = custom_tail,
-    .tail_len = sizeof(custom_tail),
-    .len_prefix_params = { .offset = 1, .size = 1, .len_includes_all = false },
-    .checksum_params = { .calc = (uint32_t (*)(const uint8_t *, size_t))crc16_modbus, .size = 1 },
-    .endianness = ENDIAN_LITTLE,
-    .max_frame_len = 64,
-    .inter_byte_timeout_ms = 10,
-    .frame_timeout_ms = 100,
-};
 /* Exported functions --------------------------------------------------------*/
 /**
  * @brief  Main program
@@ -108,12 +73,15 @@ int main(void)
     LOG_E("LOG_LVL_ERROR success!\r\n");
     
     data_mgmt_init();
+    custom_proto_init();
+    custom_proto_handshake_start();
     
     while (1)
     {
         key_event_msg_t msg;
         
         stimer_service();
+        custom_proto_task();
         
         if (key_get_event(&msg))
         {

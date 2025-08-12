@@ -187,8 +187,8 @@ void Error_Handler(void)
  */
 static void rtt_output_handler(const char *msg, size_t len)
 {
-//    SEGGER_RTT_Write(0, msg, len);
-    serial_write(uart_dbg_port, msg, len);
+    SEGGER_RTT_Write(0, msg, len);
+//    serial_write(uart_dbg_port, msg, len);
 }
 
 /* Private functions ---------------------------------------------------------*/
