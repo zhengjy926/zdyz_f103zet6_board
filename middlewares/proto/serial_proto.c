@@ -14,7 +14,7 @@
 #include <string.h>
 
 #define  LOG_TAG             "serial_proto"
-#define  LOG_LVL             4
+#define  LOG_LVL             1
 #include "log.h"
 #include <assert.h>
 

@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @copyright: Copyright To Hangzhou Dinova EP Technology Co.,Ltd
-  * @file     : app.h
+  * @file     : xx.h
   * @author   : ZJY
   * @version  : V1.0
   * @date     : 20xx-xx-xx
@@ -25,34 +25,13 @@
 
 
 /*------------------------------ typedef definition --------------------------*/
-enum app_mode {
-    INIT_MODE,
-    NOMAL_MODE,
-    CALIBRATION_MODE,
-};
 
-enum sub_mode {
-    LOOP_MODE,
-    ATTACH_MODE,
-};
 
 /*------------------------------ variable declarations -----------------------*/
 
 
 /*------------------------------ function declarations -----------------------*/
-int app_init(void);
-void app_task(void);
-void app_handshake(const uint8_t *data, uint16_t len);
-void app_get_sw_version(const uint8_t *data, uint16_t len);
-void app_set_hw_version(const uint8_t *data, uint16_t len);
-void app_get_hw_version(const uint8_t *data, uint16_t len);
-void app_set_serial_num(const uint8_t *data, uint16_t len);
-void app_get_serial_num(const uint8_t *data, uint16_t len);
-void app_ctrl_soft_reset(const uint8_t *data, uint16_t len);
-void app_self_check(const uint8_t *data, uint16_t len);
-void app_ctrl_lowpower(const uint8_t *data, uint16_t len);
-void app_ctrl_iap(const uint8_t *data, uint16_t len);
-void app_ctrl_upload(const uint8_t *data, uint16_t len);
+
 
 /******************************* End Of File **********************************/
 

@@ -58,8 +58,9 @@ uint8_t w_buf[16] = "hello nihao!";
  */
 int main(void)
 {   
-    board_init();
+    key_event_msg_t msg;
     
+    board_init();
     pin_id = gpio_get("PB.0");
     
     /* set led gpio mode */
@@ -69,23 +70,12 @@ int main(void)
     gpio_write(LED_BLUE_PIN_ID, 0);
     
     LOG_D("Init success!\r\n");
-    LOG_W("LOG_LVL_WARNING success!\r\n");
-    LOG_E("LOG_LVL_ERROR success!\r\n");
     
-    data_mgmt_init();
-    custom_proto_init();
-    custom_proto_handshake_start();
+//    app_init();
     
     while (1)
     {
-        key_event_msg_t msg;
-        
         stimer_service();
-        custom_proto_task();
-        
-        if (key_get_event(&msg))
-        {
-            LOG_D("key_id = %d, key_event = %d\r\n", msg.id, msg.event);
-        }
+//        app_task();
     }
 }

@@ -30,10 +30,8 @@
 /*------------------------------ variables prototypes -------------------------*/
 float RsOhm[2];
 
-uint8_t CalibrationFlag = 0;
-uint8_t Printf_IMP_Flag = 0;
+static uint8_t cal_state = 0;  /* 校准状态 */
 
-extern volatile uint16_t ADC_ConvertedValue;
 int impd_ad[150] = {
     138,238,338,436,537,635,733,830,927,1024,1119,1213,1308,1401,1494,
     1586,1677,1769,1858,1948,2038,2127,2215,2301,2388,2474,2559,2644,
@@ -49,19 +47,27 @@ float impd_slope[150] = {
 };
 
 /*------------------------------ function prototypes --------------------------*/
-int loop_impd_cmd_handle(uint8_t *cmd ,uint8_t *pData, uint16_t len)
+int loop_impd_init()
 {
-    if(pData[2] != T_ID)/*确保是本机命令*/
-			return 0;
-
-    if(*cmd!=pData[3])
-    {//正常模式接收所有命令
-        *cmd=pData[3];
-        return 1;
-    }
-	return 0;
+    
+    
+    return 0;
 }
 
+void loop_impd_task(void)
+{
+    
+}
+
+uint8_t loop_impd_get_cal_state(void)
+{
+    return cal_state;
+}
+
+void loop_impd_set_cal_state(uint8_t state)
+{
+    cal_state = state;
+}
 /*------------------------------ application ----------------------------------*/
 
 /******************************* End Of File ************************************/

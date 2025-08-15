@@ -28,30 +28,38 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "sys_def.h"
+#include "serial_proto.h"
+#include "serial.h"
+#include "stimer.h"
 
 /* Exported define -----------------------------------------------------------*/
 #define CUSTOM_FRAME_MAX_LEN                    256   /**< 最大帧长度 */
-#define CUSTOM_PROTO_COMMANDS_NUM_MAX           (32)
+
+#define PROTO_HEADER                            0xFA
+#define PROTO_TAIL                              0x0D
+
+#define FrameAddr                   3 //ID在数据帧第4字节
+#define FrameCMD                    4 //CMD在数据第5字节
 
 /** @defgroup The general command issued by the host
   * @{
   */
-#define CUSTOM_PROTO_CMD_HANDSHAKE              (0x01)  /* 上电握手 */
-#define CUSTOM_PROTO_CMD_GET_SW_VERSION         (0x02)  /* 查询软件版本信息 */
-#define CUSTOM_PROTO_CMD_SET_HW_VERSION	        (0x03)  /* 设置硬件版本号信息 */
-#define CUSTOM_PROTO_CMD_GET_HW_VERSION	        (0x04)  /* 查询硬件版本信息 */
-#define CUSTOM_PROTO_CMD_SET_SERIAL_NUM         (0x05)  /* 设置序列号信息 */
-#define CUSTOM_PROTO_CMD_GET_SERIAL_NUM         (0x06)  /* 查询序列号信息 */
-#define CUSTOM_PROTO_CMD_CTRL_SOFT_RESET        (0x07)  /* 系统复位控制 */
-#define CUSTOM_PROTO_CMD_SELF_CHECK             (0x08)  /* 系统自检控制 */
-#define CUSTOM_PROTO_CMD_LOWPOWER_MODE          (0x09)  /* 低功耗控制 */
-#define CUSTOM_PROTO_CMD_CTRL_IAP               (0x0A)  /* 启动在线升级 */
-#define CUSTOM_PROTO_CMD_CTRL_UPLOAD            (0x0B)  /* 控制上传模式 */
-#define CUSTOM_PROTO_CMD_ASK                    (0x2F)  /* 通用应答命令 */
+#define cmd_HandShake               (0x01)  /* 上电握手 */
+#define cmd_Get_SoftwareVersion     (0x02)  /* 查询软件版本信息 */
+#define cmd_Set_HardwareVersion     (0x03)  /* 设置硬件版本号信息 */
+#define cmd_Get_HardwareVersion     (0x04)  /* 查询硬件版本信息 */
+#define cmd_Set_SerialNumber        (0x05)  /* 设置序列号信息 */
+#define cmd_Get_SerialNumber        (0x06)  /* 查询序列号信息 */
+#define cmd_Ctrl_SoftReset          (0x07)  /* 系统复位控制 */
+#define cmd_Ctrl_SelfCheck          (0x08)  /* 系统自检控制 */
+#define cmd_Ctrl_LowPowerMode       (0x09)  /* 低功耗控制 */
+#define cmd_Ctrl_IAP                (0x0A)  /* 启动在线升级 */
+#define cmd_Ctrl_UploadMode         (0x0B)  /* 控制上传模式 */
+#define cmd_up_UniversalACK         (0x2F)  /* 错误应答命令 */
 
-typedef enum 
+typedef enum
 {
-	ack_Finish, 				//0x00	成功
+	ack_Finish = 0, 		    //0x00	成功
 	ack_Failure_Unknown,		//0x01	失败，未知错误
 	ack_Failure_Format,			//0x02	失败，格式异常
 	ack_Failure_FrameLen,		//0x03	失败，长度异常
@@ -69,25 +77,29 @@ typedef enum
 	ack_Failure_SystemLock,		//0x18	失败，系统锁定
 }ACK_Item;
 
-/* Exported typedef ----------------------------------------------------------*/
-// 命令处理函数类型
-typedef void (*ProtoCommandHandler)(const uint8_t *data, uint16_t len);
+typedef struct
+{
+	uint16_t m_Addr;
+	uint8_t m_Expand;		//扩展标记：位0 扩展地址；位1 扩展功能码；位2 扩展SN码
+	uint8_t m_Addr_Expand;	//扩展地址
+	uint8_t m_SN_Expand;	//扩展序列号
+	uint16_t m_LenMax;      //实际使用的协议帧最大帧长
+	uint16_t m_LenMin;      //实际使用的协议帧最小帧长（如有扩展位应包含）
+    uint8_t *rx_buff;       /**< 指向帧接收缓冲区，用于解析数据 */
+    uint16_t rx_buffsz;     /**< 接收缓冲区大小 */
+	uint8_t* m_TxBuffer;    //数据帧缓存空间
+    serial_t *port;
+    uint32_t (*calc_check)(const uint8_t *data, size_t len);
+    uint8_t check_size;
+    stimer_t timer;
+}Protocol_type;
 
-/* 命令表结构 */
-typedef struct {
-    uint8_t cmd_code;
-    ProtoCommandHandler handler;
-} ProtoCommandEntry;
+/* Exported typedef ----------------------------------------------------------*/
 
 /* Exported function prototypes ----------------------------------------------*/
-int custom_proto_init(void);
+int custom_proto_init(proto_parser_t *p, frame_cfg_t *cfg, Protocol_type *type);
 void custom_proto_task(void);
 int custom_proto_send_frame(uint8_t cmd, uint8_t dev_id, uint8_t module_id, const uint8_t *data, uint16_t len);
-/* 命令注册接口 */
-void proto_register_command(uint8_t cmd_code, ProtoCommandHandler handler);
-/* 命令查找接口 */
-ProtoCommandHandler proto_find_handler(uint8_t cmd_code);
-
 void custom_proto_handshake_start(void);
 void custom_proto_handshake_stop(void);
 
