@@ -35,6 +35,8 @@
 
 #include "app.h"
 #include "custom_proto.h"
+
+#include "loop_impd.h"
 /* Private typedef -----------------------------------------------------------*/
 
 /* Private define ------------------------------------------------------------*/
@@ -71,11 +73,12 @@ int main(void)
     
     LOG_D("Init success!\r\n");
     
-//    app_init();
+    app_init();
     
     while (1)
     {
         stimer_service();
+        loop_impd_task();
 //        app_task();
     }
 }

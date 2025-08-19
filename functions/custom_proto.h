@@ -38,8 +38,8 @@
 #define PROTO_HEADER                            0xFA
 #define PROTO_TAIL                              0x0D
 
-#define FrameAddr                   3 //ID在数据帧第4字节
-#define FrameCMD                    4 //CMD在数据第5字节
+#define FrameAddr                   3 //ID在数据帧第3字节
+#define FrameCMD                    4 //CMD在数据第4字节
 
 /** @defgroup The general command issued by the host
   * @{
@@ -56,6 +56,10 @@
 #define cmd_Ctrl_IAP                (0x0A)  /* 启动在线升级 */
 #define cmd_Ctrl_UploadMode         (0x0B)  /* 控制上传模式 */
 #define cmd_up_UniversalACK         (0x2F)  /* 错误应答命令 */
+
+struct Protocol_type;
+
+typedef void (*data_handler_t)(struct Protocol_type *type, uint8_t cmd, const uint8_t *data, uint16_t len);
 
 typedef enum
 {
@@ -79,29 +83,31 @@ typedef enum
 
 typedef struct
 {
-	uint16_t m_Addr;
-	uint8_t m_Expand;		//扩展标记：位0 扩展地址；位1 扩展功能码；位2 扩展SN码
-	uint8_t m_Addr_Expand;	//扩展地址
-	uint8_t m_SN_Expand;	//扩展序列号
-	uint16_t m_LenMax;      //实际使用的协议帧最大帧长
-	uint16_t m_LenMin;      //实际使用的协议帧最小帧长（如有扩展位应包含）
+    uint16_t m_Addr;        /**< 设备地址 */
+    uint8_t m_Expand;       /**< 扩展标记：位0 扩展地址；位1 扩展功能码；位2 扩展SN码 */
+    uint8_t m_Addr_Expand;  /**< 扩展地址 */
+    uint8_t m_SN_Expand;    /**< 扩展序列号 */
+    uint16_t m_LenMax;      /**< 实际使用的协议帧最大帧长 */
+    uint16_t m_LenMin;      /**< 实际使用的协议帧最小帧长（如有扩展位应包含） */
     uint8_t *rx_buff;       /**< 指向帧接收缓冲区，用于解析数据 */
     uint16_t rx_buffsz;     /**< 接收缓冲区大小 */
-	uint8_t* m_TxBuffer;    //数据帧缓存空间
-    serial_t *port;
-    uint32_t (*calc_check)(const uint8_t *data, size_t len);
-    uint8_t check_size;
-    stimer_t timer;
+	uint8_t* m_TxBuffer;    /**< 发送帧缓存区 */
+    serial_t *port;         /**< 串口设备指针 */
+    uint32_t (*calc_check)(const uint8_t *data, size_t len);    /**< 校验计算函数 */
+    uint8_t check_size;     /**< 校验字节数 */
+    stimer_t timer;         /**< 软件定时器 */
+    proto_parser_t parser;  /**< 协议解析器 */
+    frame_cfg_t frame_cfg;  /**< 帧配置 */
+    /* 回调函数 */
+    data_handler_t on_data_received;/**< 数据接收回调 */
 }Protocol_type;
 
 /* Exported typedef ----------------------------------------------------------*/
 
 /* Exported function prototypes ----------------------------------------------*/
-int custom_proto_init(proto_parser_t *p, frame_cfg_t *cfg, Protocol_type *type);
-void custom_proto_task(void);
-int custom_proto_send_frame(uint8_t cmd, uint8_t dev_id, uint8_t module_id, const uint8_t *data, uint16_t len);
-void custom_proto_handshake_start(void);
-void custom_proto_handshake_stop(void);
+int custom_proto_init(Protocol_type *type);
+void custom_proto_parser(Protocol_type *type);
+int custom_proto_send_frame(Protocol_type *type, uint8_t id, uint8_t id_Expand, uint16_t SN_Expand, const uint8_t *data, uint16_t len);
 
 #ifdef __cplusplus
 }
